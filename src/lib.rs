@@ -5,8 +5,8 @@ use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream}; 
 use std::collections::hash_map::{Entry, HashMap};
 
-use anyhow::Result;
 use thiserror::Error;
+use anyhow::{anyhow, Result};
 
 const BUFFER_SIZE: usize = 1024;
 const ADDRESS: &str = "127.0.0.1:4000";
@@ -32,6 +32,8 @@ enum ServerError {
     ParseError { reason: String },
     #[error("Failed to bind to address")]
     ConnectionError,
+    #[error("Got an invalid request")]
+    InvalidRequest,
     #[error("Received no request from client")]
     NoRequestFound,
     #[error("Failed to load response")]
@@ -42,8 +44,8 @@ enum ServerError {
 
 #[derive(Error, Debug)]
 enum ParseError {
-    #[error("Request was improperly formatted")]
-    InvalidRequest, 
+    #[error("Request was improperly formatted: {code:?}")]
+    InvalidRequest { code: u32 },
     #[error("No key found in request")]
     MissingKey,
 }
@@ -54,12 +56,21 @@ pub fn server_init() -> Result<()> {
 
     for stream in listener.incoming() {
         let mut stream = stream?;
-        let request = parse_request(&mut stream)?;
-        let response = handle_request(request, &mut storage); 
-
-        println!("Data: {:?}", storage);
-
-        send_response(response, &mut stream)?;
+         
+        match parse_request(&mut stream) {
+            Ok(request) => {
+                let response = handle_request(request, &mut storage);
+                send_response(response, &mut stream)?;
+            }, 
+            Err(err) => {
+                if let ServerError::InvalidRequest = err {
+                    // got an invalid request; skip it
+                    continue;
+                } else {
+                    return Err(anyhow!(err));
+                }
+            }
+        }
     }
 
     Ok(())
@@ -120,7 +131,7 @@ fn send_response(response: Response, stream: &mut TcpStream) -> Result<(), Serve
 fn parse_get(request: &str) -> Result<String, ParseError> {
     let parts: Vec<&str> = request.split("key=").collect();
     
-    if parts.len() != 2 { return Err(ParseError::InvalidRequest); }
+    if parts.len() != 2 { return Err(ParseError::InvalidRequest { code: 1 }); }
 
     let last_part = parts.last().unwrap();
     
@@ -132,9 +143,8 @@ fn parse_get(request: &str) -> Result<String, ParseError> {
 
 fn parse_set(request: &str) -> Result<(String, String), ParseError> {
     let parts: Vec<&str> = request.split("set?").collect();
-    println!("{:?}", parts);
 
-    if parts.len() != 2 { return Err(ParseError::InvalidRequest); }
+    if parts.len() != 2 { return Err(ParseError::InvalidRequest { code: 2 }); }
 
     let last_part = parts.last().unwrap();
 
@@ -142,11 +152,11 @@ fn parse_set(request: &str) -> Result<(String, String), ParseError> {
         Some(kv) => {
             let kv: Vec<&str> = kv.split('=').collect(); 
 
-            if kv.len() != 2 { return Err(ParseError::InvalidRequest); }
+            if kv.len() != 2 { return Err(ParseError::InvalidRequest { code: 3 }); }
 
             Ok((String::from(*kv.first().unwrap()), String::from(*kv.last().unwrap())))
         },
-        None => Err(ParseError::InvalidRequest)
+        None => Err(ParseError::InvalidRequest { code: 4 })
     }
 }
 
@@ -161,6 +171,8 @@ fn parse_request(stream: &mut TcpStream) -> Result<Request, ServerError> {
         .next()
         .ok_or(ServerError::NoRequestFound)?;
 
+    println!("Request: {}", request);
+
     if request.starts_with(GET_HEADER) {
         // get the key from the request 
         let key = parse_get(request).map_err(|err| ServerError::ParseError{ reason: err.to_string() })?;
@@ -170,6 +182,6 @@ fn parse_request(stream: &mut TcpStream) -> Result<Request, ServerError> {
         let (key, val) = parse_set(request).map_err(|err| ServerError::ParseError{ reason: err.to_string() })?;
         Ok(Request::Set(key, val))
     } else {
-        Err(ServerError::ParseError{ reason: String::from("Request was improperly formatted") })
+        Err(ServerError::InvalidRequest)
     }
 }
