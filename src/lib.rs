@@ -1,8 +1,11 @@
+#![feature(map_entry_replace)]
+
 use std::fs;
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream}; 
+use std::collections::hash_map::{Entry, HashMap};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use thiserror::Error;
 
 const BUFFER_SIZE: usize = 1024;
@@ -13,32 +16,103 @@ const SUCCESS_STATUS: &str = "HTTP/1.1 200 OK\r\n\r\n";
 const NOT_FOUND_STATUS: &str = "HTTP/1.1 404 NOT FOUND\r\n\r\n";
 
 enum Request {
-    GET(String),
-    SET(String, String),
+    Get(String),
+    Set(String, String),
+}
+
+enum Response {
+    GetSuccess(String),
+    SetSuccess,
+    NotFound,
 }
 
 #[derive(Error, Debug)]
 enum ServerError {
     #[error("There was an error parsing your request: {reason:?}")]
     ParseError { reason: String },
+    #[error("Failed to bind to address")]
+    ConnectionError,
+    #[error("Received no request from client")]
+    NoRequestFound,
+    #[error("Failed to load response")]
+    NoResponseFound,
+    #[error(transparent)]
+    IOError(#[from] std::io::Error),
 }
 
 #[derive(Error, Debug)]
 enum ParseError {
-    #[error("Request was improperly formatted.")]
+    #[error("Request was improperly formatted")]
     InvalidRequest, 
-    #[error("No key found in request.")]
+    #[error("No key found in request")]
     MissingKey,
 }
 
-fn server_init() -> Result<()> {
-    let listener = TcpListener::bind(ADDRESS).context("Failed to bind to address")?;
+pub fn server_init() -> Result<()> {
+    let mut storage: HashMap<String, String> = HashMap::new();
+    let listener = TcpListener::bind(ADDRESS).map_err(|_| ServerError::ConnectionError)?;
 
     for stream in listener.incoming() {
-        let stream = stream.context("Failed to connect to client.")?;
-        let request = parse_request(stream)?;
-        handle_request(request)?; 
+        let mut stream = stream?;
+        let request = parse_request(&mut stream)?;
+        let response = handle_request(request, &mut storage); 
+
+        println!("Data: {:?}", storage);
+
+        send_response(response, &mut stream)?;
     }
+
+    Ok(())
+}
+
+fn handle_request(request: Request, storage: &mut HashMap<String, String>) -> Response {
+    match request {
+        Request::Get(key) => {
+            if let Entry::Occupied(e) = storage.entry(key) {
+                let val = e.get();
+                Response::GetSuccess(String::from(val))
+            } else {
+                Response::NotFound
+            }
+        },
+        Request::Set(key, val) => {
+            match storage.entry(key) {
+                Entry::Occupied(o) => {
+                    // overwrite the current entry
+                    o.replace_entry(val);
+                },
+                Entry::Vacant(v) => {
+                    v.insert(val);
+                }
+            }
+
+            Response::SetSuccess
+        },
+    }
+}
+
+fn send_response(response: Response, stream: &mut TcpStream) -> Result<(), ServerError> {
+    let (status_line, filename, rv) = match response {
+        Response::GetSuccess(val) => {
+            (SUCCESS_STATUS, "get_success.html", Some(val))
+        },
+        Response::SetSuccess => {
+            (SUCCESS_STATUS, "set_success.html", None)
+        },
+        _ => (NOT_FOUND_STATUS, "404.html", None)
+    };
+
+    let contents = fs::read_to_string(filename)
+        .map_err(|_| ServerError::NoResponseFound)?;
+
+    let response = if rv.is_some() {
+        format!("{}{}{}", status_line, contents, rv.unwrap())
+    } else {
+        format!("{}{}", status_line, contents)
+    };
+
+    stream.write(response.as_bytes())?;
+    stream.flush()?;
 
     Ok(())
 }
@@ -58,6 +132,7 @@ fn parse_get(request: &str) -> Result<String, ParseError> {
 
 fn parse_set(request: &str) -> Result<(String, String), ParseError> {
     let parts: Vec<&str> = request.split("set?").collect();
+    println!("{:?}", parts);
 
     if parts.len() != 2 { return Err(ParseError::InvalidRequest); }
 
@@ -75,27 +150,26 @@ fn parse_set(request: &str) -> Result<(String, String), ParseError> {
     }
 }
 
-fn parse_request(mut stream: TcpStream) -> Result<Request, ParseError> {
+fn parse_request(stream: &mut TcpStream) -> Result<Request, ServerError> {
     let mut buffer = [0; BUFFER_SIZE];
-    stream.read(&mut buffer).expect("Failed to read client request.");
+    stream.read(&mut buffer)?;
     
     let request = String::from_utf8_lossy(&buffer[..]);
-    let request = match request.lines().take(1).next() {
-        Some(req) => req,
-        None => panic!("Received no request from client."),
-    };
-
-    // println!("Request: {}", request);
+    let request = request
+        .lines()
+        .take(1)
+        .next()
+        .ok_or(ServerError::NoRequestFound)?;
 
     if request.starts_with(GET_HEADER) {
         // get the key from the request 
-        let key = parse_get(request)?;
-        Ok(Request::GET(key))
+        let key = parse_get(request).map_err(|err| ServerError::ParseError{ reason: err.to_string() })?;
+        Ok(Request::Get(key))
     } else if request.starts_with(SET_HEADER) {
         // get the key and value from the request 
-        let (key, val) = parse_set(request)?; 
-        Ok(Request::SET(key, val))
+        let (key, val) = parse_set(request).map_err(|err| ServerError::ParseError{ reason: err.to_string() })?;
+        Ok(Request::Set(key, val))
     } else {
-        Err(ParseError::InvalidRequest)
+        Err(ServerError::ParseError{ reason: String::from("Request was improperly formatted") })
     }
 }
