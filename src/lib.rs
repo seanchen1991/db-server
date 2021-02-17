@@ -171,8 +171,6 @@ fn parse_request(stream: &mut TcpStream) -> Result<Request, ServerError> {
         .next()
         .ok_or(ServerError::NoRequestFound)?;
 
-    println!("Request: {}", request);
-
     if request.starts_with(GET_HEADER) {
         // get the key from the request 
         let key = parse_get(request).map_err(|err| ServerError::ParseError{ reason: err.to_string() })?;
