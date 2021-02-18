@@ -166,7 +166,7 @@ fn parse_set(request: &str) -> Result<(String, String), ParseError> {
 
 fn parse_request(stream: &mut TcpStream) -> Result<Request, ServerError> {
     let mut buffer = [0; BUFFER_SIZE];
-    stream.read_exact(&mut buffer)?;
+    stream.read(&mut buffer)?;
 
     let request = String::from_utf8_lossy(&buffer[..]);
     let request = request
