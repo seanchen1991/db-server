@@ -1,12 +1,14 @@
 #![feature(map_entry_replace)]
 
+mod error;
+
 use std::collections::hash_map::{Entry, HashMap};
 use std::fs;
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
 
 use anyhow::{anyhow, Result};
-use thiserror::Error;
+use error::{ServerError, ParseError};
 
 const BUFFER_SIZE: usize = 1024;
 const ADDRESS: &str = "127.0.0.1:4000";
@@ -26,33 +28,11 @@ enum Response {
     NotFound,
 }
 
-#[derive(Error, Debug)]
-enum ServerError {
-    #[error("There was an error parsing your request: {reason:?}")]
-    ParseError { reason: String },
-    #[error("Failed to bind to address")]
-    ConnectionError,
-    #[error("Got an invalid request")]
-    InvalidRequest,
-    #[error("Received no request from client")]
-    NoRequestFound,
-    #[error("Failed to load response")]
-    NoResponseFound,
-    #[error(transparent)]
-    IoError(#[from] std::io::Error),
-}
-
-#[derive(Error, Debug)]
-enum ParseError {
-    #[error("Request was improperly formatted: {code:?}")]
-    InvalidRequest { code: u32 },
-    #[error("No key found in request")]
-    MissingKey,
-}
-
 pub fn server_init() -> Result<()> {
     let mut storage: HashMap<String, String> = HashMap::new();
     let listener = TcpListener::bind(ADDRESS).map_err(|_| ServerError::ConnectionError)?;
+
+    println!("Listening on {}...", ADDRESS);
 
     for stream in listener.incoming() {
         let mut stream = stream?;
@@ -79,23 +59,30 @@ pub fn server_init() -> Result<()> {
 fn handle_request(request: Request, storage: &mut HashMap<String, String>) -> Response {
     match request {
         Request::Get(key) => {
-            if let Entry::Occupied(e) = storage.entry(key) {
+            if let Entry::Occupied(e) = storage.entry(key.clone()) {
                 let val = e.get();
+
+                println!("GET: key={}, value={}", key, val);
+
                 Response::GetSuccess(String::from(val))
             } else {
+                println!("Failed to GET value for key={}", key);
+                
                 Response::NotFound
             }
         }
         Request::Set(key, val) => {
-            match storage.entry(key) {
+            match storage.entry(key.clone()) {
                 Entry::Occupied(o) => {
                     // overwrite the current entry
-                    o.replace_entry(val);
+                    o.replace_entry(val.clone());
                 }
                 Entry::Vacant(v) => {
-                    v.insert(val);
+                    v.insert(val.clone());
                 }
             }
+            
+            println!("SET: key={}, value={}", key, val);
 
             Response::SetSuccess
         }
