@@ -16,5 +16,6 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "1"
-serde_any = "0.5"

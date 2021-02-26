@@ -3,12 +3,15 @@
 mod error;
 
 use std::collections::hash_map::{Entry, HashMap};
-use std::fs;
+use std::fs::{self, File};
 use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use error::{ServerError, ParseError};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 const BUFFER_SIZE: usize = 1024;
 const ADDRESS: &str = "127.0.0.1:4000";
@@ -29,15 +32,16 @@ enum Response {
     NotFound,
 }
 
-struct Storage {
-    map: HashMap<String, String>
-}
+#[derive(Serialize, Deserialize)]
+struct Storage(HashMap<String, Value>);
 
 pub fn server_init() -> Result<()> {
-    let map: HashMap<String, String> = serde_any::from_file(PERSIST)
-        .map_err(|_| ServerError::LoadError)?;
-    let mut storage = Storage { map };
-
+    let persisted = fs::read_to_string(PERSIST)
+        .map_err(|err| ServerError::IoError(err))?;
+    let mut storage = Storage(
+        serde_json::from_str(&persisted)
+            .unwrap_or(HashMap::new())
+    );
     let listener = TcpListener::bind(ADDRESS).map_err(|_| ServerError::ConnectionError)?;
 
     println!("Listening on {}...", ADDRESS);
@@ -67,19 +71,33 @@ pub fn server_init() -> Result<()> {
 impl Drop for Storage {
     fn drop(&mut self) {
         // Flush the contents of the HashMap to the persistence file 
-        serde_any::to_file(PERSIST, &self.map).expect("Failed to flush to persistence file");
+        println!("Flushing data to disk...");
+
+        let path = Path::new(PERSIST);
+        let json = serde_json::to_string(&self.0).expect("Failed to serialize data"); 
+
+        let mut file = match File::create(&path) {
+            Ok(file) => file,
+            Err(_) => panic!("Failed to open persistence file"),
+        };
+    
+        if let Err(_) = file.write_all(json.as_bytes()) {
+            eprintln!("Failed to write to persistence file"); 
+        }
+
+        println!("Successfully flushed data to disk");
     }
 }
 
 fn handle_request(request: Request, storage: &mut Storage) -> Response {
     match request {
         Request::Get(key) => {
-            if let Entry::Occupied(e) = storage.map.entry(key.clone()) {
+            if let Entry::Occupied(e) = storage.0.entry(key.clone()) {
                 let val = e.get();
 
                 println!("GET: key={}, value={}", key, val);
 
-                Response::GetSuccess(String::from(val))
+                Response::GetSuccess(val.to_string())
             } else {
                 println!("Failed to GET value for key={}", key);
                 
@@ -87,13 +105,13 @@ fn handle_request(request: Request, storage: &mut Storage) -> Response {
             }
         },
         Request::Set(key, val) => {
-            match storage.map.entry(key.clone()) {
+            match storage.0.entry(key.clone()) {
                 Entry::Occupied(o) => {
                     // overwrite the current entry
-                    o.replace_entry(val.clone());
+                    o.replace_entry(Value::from(val.clone()));
                 }
                 Entry::Vacant(v) => {
-                    v.insert(val.clone());
+                    v.insert(Value::from(val.clone()));
                 }
             }
             
