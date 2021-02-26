@@ -12,6 +12,8 @@ pub enum ServerError {
     NoRequestFound,
     #[error("Failed to load response")]
     NoResponseFound,
+    #[error("Failed to load persisted data")]
+    LoadError,
     #[error(transparent)]
     IoError(#[from] std::io::Error),
 }

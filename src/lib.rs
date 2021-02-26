@@ -16,6 +16,7 @@ const SET_HEADER: &str = "GET /set?";
 const GET_HEADER: &str = "GET /get?key=";
 const SUCCESS_STATUS: &str = "HTTP/1.1 200 OK\r\n\r\n";
 const NOT_FOUND_STATUS: &str = "HTTP/1.1 404 NOT FOUND\r\n\r\n";
+const PERSIST: &str = "persist.json";
 
 enum Request {
     Get(String),
@@ -28,8 +29,15 @@ enum Response {
     NotFound,
 }
 
+struct Storage {
+    map: HashMap<String, String>
+}
+
 pub fn server_init() -> Result<()> {
-    let mut storage: HashMap<String, String> = HashMap::new();
+    let map: HashMap<String, String> = serde_any::from_file(PERSIST)
+        .map_err(|_| ServerError::LoadError)?;
+    let mut storage = Storage { map };
+
     let listener = TcpListener::bind(ADDRESS).map_err(|_| ServerError::ConnectionError)?;
 
     println!("Listening on {}...", ADDRESS);
@@ -56,10 +64,17 @@ pub fn server_init() -> Result<()> {
     Ok(())
 }
 
-fn handle_request(request: Request, storage: &mut HashMap<String, String>) -> Response {
+impl Drop for Storage {
+    fn drop(&mut self) {
+        // Flush the contents of the HashMap to the persistence file 
+        serde_any::to_file(PERSIST, &self.map).expect("Failed to flush to persistence file");
+    }
+}
+
+fn handle_request(request: Request, storage: &mut Storage) -> Response {
     match request {
         Request::Get(key) => {
-            if let Entry::Occupied(e) = storage.entry(key.clone()) {
+            if let Entry::Occupied(e) = storage.map.entry(key.clone()) {
                 let val = e.get();
 
                 println!("GET: key={}, value={}", key, val);
@@ -70,9 +85,9 @@ fn handle_request(request: Request, storage: &mut HashMap<String, String>) -> Re
                 
                 Response::NotFound
             }
-        }
+        },
         Request::Set(key, val) => {
-            match storage.entry(key.clone()) {
+            match storage.map.entry(key.clone()) {
                 Entry::Occupied(o) => {
                     // overwrite the current entry
                     o.replace_entry(val.clone());
